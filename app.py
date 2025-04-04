@@ -1,20 +1,23 @@
+
 import streamlit as st
 import pandas as pd
 import joblib
 from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
 from sklearn.utils import resample
 from sklearn.metrics import classification_report, accuracy_score
-import base64
 import matplotlib.pyplot as plt
 import seaborn as sns
+from io import BytesIO
 
 st.set_page_config(page_title="Classificador de Tickets", layout="wide")
+st.title("🎯 Classificação de Tickets com IA")
 
 colunas_texto = ['ASSUNTO', 'DESCRICAO', 'DESCRICAOTICKET', 'MENSAGEMERRO', 'CATEGORIA', 'MODULO', 'TIPO']
 alvos = ['TIPO 2', 'MOTIVO', 'ROTINA', 'FREQUÊNCIA', 'IMPACTO']
+modelos = {}
 
 def normalizar_coluna(col):
     return col.fillna('').str.strip().str.lower().str.capitalize()
@@ -23,7 +26,6 @@ def balancear_dataframe(df, coluna_alvo):
     classes = df[coluna_alvo].value_counts()
     maior_classe = classes.idxmax()
     n_samples = classes.max()
-
     dfs_balanceados = []
     for valor in classes.index:
         df_classe = df[df[coluna_alvo] == valor]
@@ -31,122 +33,122 @@ def balancear_dataframe(df, coluna_alvo):
             continue
         df_upsampled = resample(df_classe, replace=True, n_samples=n_samples, random_state=42)
         dfs_balanceados.append(df_upsampled)
-
     return pd.concat(dfs_balanceados)
 
 def treinar_modelos(df):
     modelos = {}
-    df['TEXTO'] = df[colunas_texto].fillna('').agg(' '.join, axis=1).str.strip()
-
+    st.header("📊 Acurácia dos Modelos")
+    df['TEXTO'] = df[colunas_texto].fillna('').agg(' '.join, axis=1)
     for alvo in alvos:
         df[alvo] = normalizar_coluna(df[alvo])
         df_filtrado = df.dropna(subset=[alvo])
-        df_filtrado = df_filtrado[df_filtrado[alvo].str.strip() != '']
-
-        if df_filtrado.empty or df_filtrado[alvo].nunique() < 2:
-            st.warning(f"⚠️ Coluna '{alvo}' vazia ou com apenas uma classe.")
+        if df_filtrado[alvo].nunique() < 2:
+            st.warning(f"⚠️ Coluna '{alvo}' possui menos de 2 classes após filtragem. Ignorada.")
             continue
-
-        df_balanceado = balancear_dataframe(df_filtrado, alvo)
-        X = df_balanceado['TEXTO']
-        y = df_balanceado[alvo]
-
+        df_bal = balancear_dataframe(df_filtrado, alvo)
+        X = df_bal['TEXTO']
+        y = df_bal[alvo]
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        pipeline = Pipeline([
+        pipe = Pipeline([
             ('tfidf', TfidfVectorizer(max_features=5000)),
             ('clf', LogisticRegression(max_iter=1000))
         ])
-        pipeline.fit(X_train, y_train)
-
-        y_pred = pipeline.predict(X_test)
+        pipe.fit(X_train, y_train)
+        y_pred = pipe.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
-        st.subheader(f"✅ {alvo} — Acurácia: {acc:.2%}")
-        st.text(classification_report(y_test, y_pred, zero_division=0))
-        modelos[alvo] = pipeline
-
+        st.markdown(f"### ✅ {alvo.upper()} — Acurácia: {acc:.2%}")
+        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        df_report = pd.DataFrame(report).transpose()
+        st.dataframe(df_report.style.format("{:.2f}"))
+        modelos[alvo] = pipe
+        joblib.dump(pipe, f"modelo_{alvo}.pkl")
     return modelos
 
-def aplicar_modelos(df, modelos):
-    df['TEXTO'] = df[colunas_texto].fillna('').agg(' '.join, axis=1).str.strip()
-
+def aplicar_modelos(df):
+    df['TEXTO'] = df[colunas_texto].fillna('').agg(' '.join, axis=1)
     for alvo in alvos:
-        if alvo not in modelos:
+        if alvo not in df.columns:
             continue
-        df[alvo] = df[alvo].astype(object)
-        cond_total = df['TEXTO'].notna() & (df['TEXTO'].str.strip() != '')
-        df.loc[cond_total, alvo] = modelos[alvo].predict(df.loc[cond_total, 'TEXTO'])
-
-    return df.drop(columns=['TEXTO'])
-
-def gerar_botao_download(df, nome_arquivo):
-    csv = df.to_csv(index=False).encode()
-    b64 = base64.b64encode(csv).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="{nome_arquivo}">📥 Clique aqui para baixar a planilha classificada</a>'
-    return href
+        try:
+            modelo = joblib.load(f"modelo_{alvo}.pkl")
+            cond_total = df[alvo].isna() | (df[alvo].astype(str).str.strip() == '')
+            df.loc[cond_total, alvo] = modelo.predict(df.loc[cond_total, 'TEXTO'])
+        except Exception as e:
+            st.error(f"Erro ao aplicar modelo '{alvo}': {e}")
+    return df
 
 def gerar_graficos(df):
-    st.subheader("📊 Análises Gráficas")
+    st.header("📈 Análises dos Tickets Classificados")
+    for col in ['TIPO 2', 'MOTIVO', 'ROTINA', 'FREQUÊNCIA', 'IMPACTO', 'MODULO', 'CLIENTE']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().str.capitalize()
+
+    if 'ABERTURA' in df.columns:
+        df['ABERTURA'] = pd.to_datetime(df['ABERTURA'], errors='coerce')
+        df['MES_ABERTURA'] = df['ABERTURA'].dt.to_period('M').astype(str)
 
     if 'TIPO 2' in df.columns:
-        st.markdown("**Quantidade de Chamados por Tipo 2:**")
+        st.subheader("✔️ Quantidade de Chamados por Tipo 2")
         fig1, ax1 = plt.subplots()
-        sns.countplot(y='TIPO 2', data=df, order=df['TIPO 2'].value_counts().index, ax=ax1)
+        df['TIPO 2'].value_counts().plot(kind='barh', ax=ax1)
         st.pyplot(fig1)
 
     if 'MOTIVO' in df.columns and 'ROTINA' in df.columns:
-        st.markdown("**Mapa de Calor: Motivo x Rotina:**")
+        st.subheader("✔️ Mapa de Calor: MOTIVO x ROTINA")
         fig2, ax2 = plt.subplots(figsize=(12, 6))
-        heatmap_data = pd.crosstab(df['MOTIVO'], df['ROTINA'])
-        sns.heatmap(heatmap_data, cmap='YlGnBu', linewidths=.5, ax=ax2)
+        heat = pd.crosstab(df['MOTIVO'], df['ROTINA'])
+        sns.heatmap(heat, cmap="YlGnBu", ax=ax2)
         st.pyplot(fig2)
 
-    if 'FREQUÊNCIA' in df.columns and 'ABERTURA' in df.columns:
-        st.markdown("**Frequência ao longo do tempo:**")
-        df['ABERTURA'] = pd.to_datetime(df['ABERTURA'], errors='coerce')
-        df['MES_ABERTURA'] = df['ABERTURA'].dt.to_period('M').astype(str)
-        freq_time = df.groupby(['MES_ABERTURA', 'FREQUÊNCIA']).size().unstack(fill_value=0)
+    if 'FREQUÊNCIA' in df.columns and 'MES_ABERTURA' in df.columns:
+        st.subheader("✔️ Frequência ao Longo do Tempo")
         fig3, ax3 = plt.subplots()
-        freq_time.plot(marker='o', ax=ax3)
+        freq_tempo = df.groupby(['MES_ABERTURA', 'FREQUÊNCIA']).size().unstack().fillna(0)
+        freq_tempo.plot(marker='o', ax=ax3)
         st.pyplot(fig3)
 
     if 'IMPACTO' in df.columns and 'MODULO' in df.columns:
-        st.markdown("**Impacto por Módulo:**")
-        impacto_modulo = pd.crosstab(df['MODULO'], df['IMPACTO'])
-        fig4, ax4 = plt.subplots(figsize=(10, 6))
-        impacto_modulo.plot(kind='barh', stacked=True, ax=ax4)
+        st.subheader("✔️ Impacto por Módulo")
+        fig4, ax4 = plt.subplots()
+        imp = pd.crosstab(df['MODULO'], df['IMPACTO'])
+        imp.plot(kind='barh', stacked=True, ax=ax4)
         st.pyplot(fig4)
 
     if 'FREQUÊNCIA' in df.columns and 'IMPACTO' in df.columns:
-        st.markdown("**Chamados recorrentes com impacto alto:**")
-        filtro = df['FREQUÊNCIA'].str.contains('recorrente', case=False, na=False) & \
-                 df['IMPACTO'].str.contains('alto', case=False, na=False)
-        df_filtrado = df[filtro]
-        if not df_filtrado.empty:
-            st.dataframe(df_filtrado[['TICKET', 'ROTINA', 'MOTIVO', 'IMPACTO', 'FREQUÊNCIA', 'CLIENTE']])
-        else:
-            st.info("Nenhum chamado recorrente com impacto alto encontrado.")
+        st.subheader("✔️ Chamados Recorrentes com Impacto Alto")
+        recorrente = df[
+            df['FREQUÊNCIA'].str.lower().str.contains('recorrente') &
+            df['IMPACTO'].str.lower().str.contains('alto')
+        ]
+        st.dataframe(recorrente)
 
-# --- APP INICIA AQUI ---
-st.title("🤖 Classificador Inteligente de Tickets")
-st.markdown("Treine um modelo com tickets classificados e use para categorizar novos registros.")
+    return df
 
-with st.expander("1️⃣ Envie a planilha de **treinamento** (.xlsx)"):
-    file_treinamento = st.file_uploader("Upload da planilha de treinamento", type="xlsx", key="treino")
+# ETAPAS
+st.sidebar.title("Etapas do Processo")
 
-if file_treinamento:
-    df_treino = pd.read_excel(file_treinamento)
-    st.success("✅ Planilha de treinamento carregada.")
-    modelos = treinar_modelos(df_treino)
+# 1️⃣ Upload da planilha de treinamento
+arquivo_treinamento = st.sidebar.file_uploader("📁 Upload: Planilha de Treinamento", type=["xlsx"], key="treinamento")
+if arquivo_treinamento:
+    df_train = pd.read_excel(arquivo_treinamento)
+    modelos = treinar_modelos(df_train)
 
-    with st.expander("2️⃣ Envie a planilha de **novos tickets** para classificar"):
-        file_classificacao = st.file_uploader("Upload da planilha para classificação", type="xlsx", key="classifica")
+# 2️⃣ Upload da planilha a classificar
+arquivo_classificar = st.sidebar.file_uploader("📁 Upload: Planilha a Classificar", type=["xlsx"], key="classificacao")
+if arquivo_classificar and modelos:
+    df_novos = pd.read_excel(arquivo_classificar)
+    st.subheader("🔎 Amostra dos Dados a Serem Classificados")
+    st.dataframe(df_novos.head())
+    df_classificado = aplicar_modelos(df_novos)
+    gerar_graficos(df_classificado)
 
-    if file_classificacao:
-        df_novos = pd.read_excel(file_classificacao)
-        df_resultado = aplicar_modelos(df_novos.copy(), modelos)
-
-        st.success("✅ Classificação concluída.")
-        gerar_graficos(df_resultado)
-
-        st.markdown("### 📥 Download da planilha classificada:")
-        st.markdown(gerar_botao_download(df_resultado, "tickets_classificados.csv"), unsafe_allow_html=True)
+    # 3️⃣ Download ao final
+    st.subheader("📥 Download da Planilha Classificada")
+    buffer = BytesIO()
+    df_classificado.to_excel(buffer, index=False, engine='openpyxl')
+    st.download_button(
+        label="⬇️ Baixar Planilha Classificada",
+        data=buffer.getvalue(),
+        file_name="Tickets_Classificados.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
